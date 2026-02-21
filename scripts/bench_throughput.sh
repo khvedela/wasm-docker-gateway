@@ -43,11 +43,14 @@ fi
 # --- Helpers ---
 
 ts_ms() {
-  # portable ms timestamp
-  python3 - <<'PY'
-import time
-print(int(time.time()*1000))
-PY
+  # GNU date supports %3N (milliseconds); macOS date does not — fall back to python3.
+  local t
+  t="$(date +%s%3N 2>/dev/null)"
+  if [[ "$t" =~ ^[0-9]{10,}$ ]]; then
+    printf '%s\n' "$t"
+  else
+    python3 -c 'import time; print(int(time.time()*1000))'
+  fi
 }
 
 duration_to_seconds() {
@@ -83,9 +86,10 @@ sample_wasmedge_sum() {
 # Sampler body — runs as a direct background job (not inside a command substitution)
 # so that $! in the caller is always the real loop PID.
 _sampler_loop() {
-  local mode="$1"   # gateway | wasmedge
-  local pid="$2"    # gateway pid (used for liveness)
+  local mode="$1"        # gateway | wasmedge
+  local pid="$2"         # liveness pid — loop exits when this pid dies
   local out="$3"
+  local sample_pid="${4:-$pid}"  # pid to sample for RSS/CPU (default: same as liveness pid)
 
   echo "ts_ms,rss_kb,cpu_pct" > "$out"
 
@@ -95,7 +99,7 @@ _sampler_loop() {
   # Immediate first sample so short runs don't produce header-only files
   local line=""
   if [[ "$mode" == "gateway" ]]; then
-    line="$(sample_pid "$pid" 2>/dev/null)"
+    line="$(sample_pid "$sample_pid" 2>/dev/null)"
   else
     line="$(sample_wasmedge_sum 2>/dev/null)"
   fi
@@ -104,7 +108,7 @@ _sampler_loop() {
   while kill -0 "$pid" >/dev/null 2>&1; do
     line=""
     if [[ "$mode" == "gateway" ]]; then
-      line="$(sample_pid "$pid" 2>/dev/null)"
+      line="$(sample_pid "$sample_pid" 2>/dev/null)"
     else
       line="$(sample_wasmedge_sum 2>/dev/null)"
     fi
@@ -241,7 +245,18 @@ bench_variant() {
       local gw_samples we_samples
       gw_samples="$RESULTS_DIR/samples_${variant}_${workload}_${conns}_gw.csv"
       we_samples="$RESULTS_DIR/samples_${variant}_${workload}_${conns}_we.csv"
-      _sampler_loop gateway "$pid" "$gw_samples" &
+
+      # For native_docker: $pid is the 'docker run' CLI (tiny RSS, 0 CPU).
+      # Get the container's real host PID so the sampler measures the gateway process.
+      local gw_sample_pid="$pid"
+      if [[ "$variant" == "native_docker" ]]; then
+        local container_name="gateway-native-${PORT}"
+        local cpid
+        cpid="$(docker inspect --format '{{.State.Pid}}' "$container_name" 2>/dev/null || true)"
+        [[ "$cpid" =~ ^[0-9]+$ && "$cpid" != "0" ]] && gw_sample_pid="$cpid"
+      fi
+
+      _sampler_loop gateway "$pid" "$gw_samples" "$gw_sample_pid" &
       sampler_gw_pid=$!
       _sampler_loop wasmedge "$pid" "$we_samples" &
       sampler_we_pid=$!
