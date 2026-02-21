@@ -38,7 +38,7 @@ run_server_and_bench() {
   log "benchmarking warm latency for $variant (warmup=20 runs=300)"
   local json="$RESULTS_DIR/tmp_warm_${variant}_${TS}.json"
 
-  hyperfine --warmup 20 --runs 300 --export-json "$json" \
+  hyperfine --warmup 20 --runs 300 --ignore-failure --export-json "$json" \
     "curl -fsS --max-time 5 http://127.0.0.1:${PORT}/ >/dev/null"
 
   jq -r --arg variant "$variant" \

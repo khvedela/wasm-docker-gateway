@@ -1,6 +1,8 @@
 # Exclude Rust build artifacts — the Docker build compiles from source.
 # Without this, 'COPY . /app' transfers gigabytes and breaks layer caching.
 target/
+# Exception: allow the pre-built binary for Dockerfile.prebuilt (fast path).
+!target/release/gateway_native
 
 # Benchmark results and temp files — not needed in the image
 results/

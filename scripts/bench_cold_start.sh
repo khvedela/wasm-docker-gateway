@@ -52,7 +52,11 @@ bench_one "wasm_host_cli" "WASM_MODULE_PATH=$ROOT/gateway_logic.wasm ./scripts/r
 # native_docker: pre-build the image once so the 20 hyperfine iterations only
 # measure container startup time, not image build time.
 log "pre-building gateway-native:dev for native_docker cold-start …"
-docker build -q -t gateway-native:dev -f ./gateway_native/Dockerfile . >&2
+if [[ -f "./target/release/gateway_native" ]]; then
+  docker build -q -t gateway-native:dev -f ./gateway_native/Dockerfile.prebuilt . >&2
+else
+  docker build -q -t gateway-native:dev -f ./gateway_native/Dockerfile . >&2
+fi
 bench_one "native_docker" "SKIP_BUILD=1 PORT=$PORT ./scripts/run_docker.sh"
 
 log "wrote $OUT"

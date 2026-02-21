@@ -1,0 +1,15 @@
+# Fast benchmark image — expects the binary to be pre-built on the host.
+# Used by run_docker.sh when target/release/gateway_native already exists,
+# skipping the full Rust source compile (~5-10 min on a VM).
+#
+# Build context must be the workspace root (same as the source Dockerfile):
+#   docker build -t gateway-native:dev -f gateway_native/Dockerfile.prebuilt .
+FROM debian:bookworm-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+COPY target/release/gateway_native /usr/local/bin/gateway_native
+EXPOSE 8080
+ENV LISTEN=0.0.0.0:8080
+ENV UPSTREAM_URL=http://host.docker.internal:18080
+CMD ["gateway_native"]

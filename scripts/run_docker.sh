@@ -31,8 +31,15 @@ IMAGE="gateway-native:dev"
 # 1. Build image (skip with SKIP_BUILD=1, e.g. from cold-start bench)
 # ---------------------------------------------------------------------------
 if [[ "${SKIP_BUILD:-0}" != "1" ]]; then
-  echo "[run_docker] building $IMAGE from gateway_native/Dockerfile …" >&2
-  docker build -t "$IMAGE" -f ./gateway_native/Dockerfile . >&2
+  # Prefer the fast prebuilt path when the binary already exists on the host.
+  # Falls back to full source compile (Dockerfile) if binary is missing.
+  if [[ -f "./target/release/gateway_native" ]]; then
+    echo "[run_docker] pre-built binary found — using Dockerfile.prebuilt (fast)" >&2
+    docker build -t "$IMAGE" -f ./gateway_native/Dockerfile.prebuilt . >&2
+  else
+    echo "[run_docker] no pre-built binary — building from source (slow first run)" >&2
+    docker build -t "$IMAGE" -f ./gateway_native/Dockerfile . >&2
+  fi
 else
   echo "[run_docker] SKIP_BUILD=1 — reusing existing image $IMAGE" >&2
 fi
