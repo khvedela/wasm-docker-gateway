@@ -1,0 +1,15 @@
+# Exclude Rust build artifacts — the Docker build compiles from source.
+# Without this, 'COPY . /app' transfers gigabytes and breaks layer caching.
+target/
+
+# Benchmark results and temp files — not needed in the image
+results/
+*.wasm
+
+# VCS and OS noise
+.git/
+.DS_Store
+
+# Editor / IDE directories
+.vscode/
+.idea/

@@ -1,0 +1,6 @@
+services:
+  upstream:
+    image: hashicorp/http-echo:1.0.0
+    command: ["-listen=:18080", "-text=ok"]
+    ports:
+      - "18080:18080"
