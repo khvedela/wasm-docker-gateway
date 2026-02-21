@@ -27,6 +27,9 @@ fi
 start_upstream
 ./scripts/build_wasm.sh
 
+log "pre-building native binaries (cargo build --release) …"
+cargo build --release --bin gateway_native --bin gateway_host
+
 # Write a single, stable aggregated CSV (timestamps are columns, not filenames)
 AGG_DIR="$RESULTS_DIR/aggregated"
 mkdir -p "$AGG_DIR"

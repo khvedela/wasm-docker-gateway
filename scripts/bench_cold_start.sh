@@ -13,6 +13,11 @@ cd "$ROOT"
 start_upstream
 ./scripts/build_wasm.sh
 
+# Pre-build Rust binaries so hyperfine measures process startup, not compilation.
+# On a fresh clone this can take minutes — do it once here, not inside the loop.
+log "pre-building native binaries (cargo build --release) …"
+cargo build --release --bin gateway_native --bin gateway_host
+
 OUT="$RESULTS_DIR/cold_start_${TS}.csv"
 echo "variant,run_ms" > "$OUT"
 
@@ -28,7 +33,7 @@ bench_one() {
       set -euo pipefail
       ($cmd) >\"$RESULTS_DIR/${variant}_${TS}.log\" 2>&1 &
       pid=\$!
-      for i in \$(seq 1 200); do
+      for i in \$(seq 1 600); do
         curl -fsS --max-time 1 http://127.0.0.1:${PORT}/health >/dev/null 2>&1 && break
         sleep 0.01
       done

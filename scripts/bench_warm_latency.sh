@@ -12,6 +12,9 @@ cd "$ROOT"
 start_upstream
 ./scripts/build_wasm.sh
 
+log "pre-building native binaries (cargo build --release) …"
+cargo build --release --bin gateway_native --bin gateway_host
+
 OUT="$RESULTS_DIR/warm_latency_${TS}.csv"
 echo "variant,run_ms" > "$OUT"
 
