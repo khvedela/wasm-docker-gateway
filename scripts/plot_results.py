@@ -227,6 +227,14 @@ def bar_chart(
 def plot_cold_start(path: str, out_dir: str) -> None:
     print("\n[5] Cold start")
     df = pd.read_csv(path)
+    if "run_ms" not in df.columns:
+        print(f"  SKIP: cold_start CSV missing 'run_ms' column. "
+              f"Found: {list(df.columns)}. "
+              f"File: {path}", file=sys.stderr)
+        return
+    if df.empty:
+        print(f"  SKIP: cold_start CSV has no data rows ({path})", file=sys.stderr)
+        return
     df["run_ms"] = pd.to_numeric(df["run_ms"], errors="coerce")
 
     means  = df.groupby("variant")["run_ms"].mean().to_dict()
@@ -248,6 +256,14 @@ def plot_cold_start(path: str, out_dir: str) -> None:
 def plot_warm_latency(path: str, out_dir: str) -> None:
     print("\n[6] Warm latency")
     df = pd.read_csv(path)
+    if "run_ms" not in df.columns:
+        print(f"  SKIP: warm_latency CSV missing 'run_ms' column. "
+              f"Found: {list(df.columns)}. "
+              f"File: {path}", file=sys.stderr)
+        return
+    if df.empty:
+        print(f"  SKIP: warm_latency CSV has no data rows ({path})", file=sys.stderr)
+        return
     df["run_ms"] = pd.to_numeric(df["run_ms"], errors="coerce")
 
     means  = df.groupby("variant")["run_ms"].mean().to_dict()

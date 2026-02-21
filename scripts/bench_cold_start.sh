@@ -41,9 +41,15 @@ bench_one() {
       kill -9 \$pid >/dev/null 2>&1 || true
     '"
 
+  # hyperfine < 1.16 used "times"; >= 1.16 renamed it to "individual_times".
+  # Support both with a fallback expression.
   jq -r --arg variant "$variant" \
-    '.results[0].times[] | "\($variant),\(. * 1000)"' \
+    '(.results[0].individual_times // .results[0].times)[] | "\($variant),\(. * 1000)"' \
     "$json" >> "$OUT"
+
+  local nrows
+  nrows=$(( $(wc -l < "$OUT") - 1 ))
+  log "  $variant: wrote $nrows rows to $(basename "$OUT")"
 }
 
 bench_one "native_local"  "./scripts/run_native_local.sh"

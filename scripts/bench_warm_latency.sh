@@ -42,7 +42,7 @@ run_server_and_bench() {
     "curl -fsS --max-time 5 http://127.0.0.1:${PORT}/ >/dev/null"
 
   jq -r --arg variant "$variant" \
-    '.results[0].times[] | "\($variant),\(. * 1000)"' \
+    '(.results[0].individual_times // .results[0].times)[] | "\($variant),\(. * 1000)"' \
     "$json" >> "$OUT"
 
   kill -9 "$pid" >/dev/null 2>&1 || true
