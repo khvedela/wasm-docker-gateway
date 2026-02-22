@@ -30,6 +30,12 @@ start_upstream
 log "pre-building native binaries (cargo build --release) …"
 cargo build --release --bin gateway_native --bin gateway_host
 
+# Load benchmark env once so bench_variant command strings can stay as pure
+# exec invocations (no extra shell command layers before exec).
+set -a
+source "$ROOT/configs/bench.env"
+set +a
+
 # Aggregated CSV — written fresh each run so stale data from prior runs
 # never pollutes averages.  Set APPEND_RESULTS=1 to accumulate across runs.
 AGG_DIR="$RESULTS_DIR/aggregated"
@@ -181,6 +187,12 @@ bench_variant() {
     exit 1
   fi
 
+  if ! kill -0 "$pid" >/dev/null 2>&1; then
+    echo "ERROR: launched PID $pid for $variant is not alive after health check" >&2
+    tail -n 160 "$server_log" || true
+    exit 1
+  fi
+
   # Start one sampler per variant now that the gateway is fully up.
   # Attaching after wait_http_200 means the process is stable — no exec race.
   # The sampler writes a continuous stream; each wrk window is sliced by timestamp.
@@ -188,7 +200,14 @@ bench_variant() {
   if [[ "$variant" == "native_docker" ]]; then
     local container_name="gateway-native-${PORT}"
     local cpid
-    cpid="$(docker inspect --format '{{.State.Pid}}' "$container_name" 2>/dev/null || true)"
+    cpid=""
+    for _ in $(seq 1 40); do
+      cpid="$(docker inspect --format '{{.State.Pid}}' "$container_name" 2>/dev/null || true)"
+      if [[ -n "$cpid" && "$cpid" != "0" && "$cpid" =~ ^[0-9]+$ ]]; then
+        break
+      fi
+      sleep 0.05
+    done
     if [[ -z "$cpid" || "$cpid" == "0" || ! "$cpid" =~ ^[0-9]+$ ]]; then
       echo "ERROR: failed to resolve valid container PID for ${container_name} (got: '${cpid}')" >&2
       exit 1
@@ -305,12 +324,10 @@ bench_variant() {
 # first wrk run cargo has near-zero RSS, making all subsequent memory samples
 # read 0.  Directly exec-ing the binary avoids this entirely.
 bench_variant "native_local" \
-  "set -a; source \"$ROOT/configs/bench.env\"; set +a
-   exec \"$ROOT/target/release/gateway_native\""
+  "exec \"$ROOT/target/release/gateway_native\""
 bench_variant "native_docker" "PORT=$PORT exec \"$ROOT/scripts/run_docker.sh\""
 bench_variant "wasm_host_cli" \
-  "set -a; source \"$ROOT/configs/bench.env\"; set +a
-   WASM_MODULE_PATH=\"$ROOT/gateway_logic.wasm\" exec \"$ROOT/target/release/gateway_host\""
+  "WASM_MODULE_PATH=\"$ROOT/gateway_logic.wasm\" exec \"$ROOT/target/release/gateway_host\""
 
 # ---------------------------------------------------------------------------
 # ANALYSIS CSV
