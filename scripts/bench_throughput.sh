@@ -68,97 +68,31 @@ duration_to_seconds() {
   fi
 }
 
-# Read RSS for a PID. ps -o rss= is instantaneous on both Linux and macOS.
-_rss_kb() {
-  local pid="$1"
-  ps -o rss= -p "$pid" 2>/dev/null | awk '{print $1}' || true
-}
+# Resolve Python interpreter — prefer the project venv if present.
+PYTHON=""
+for _py in "$ROOT/.venv/bin/python3" "$ROOT/.venv/bin/python" python3 python; do
+  if command -v "$_py" >/dev/null 2>&1; then PYTHON="$_py"; break; fi
+done
+[[ -n "$PYTHON" ]] || { echo "ERROR: no python3 found" >&2; exit 1; }
 
-# Read total CPU ticks (utime+stime) from /proc/$pid/stat.
-# Returns empty on macOS or if the file is unreadable.
-_cpu_ticks() {
-  local pid="$1"
-  [[ -r "/proc/$pid/stat" ]] || return 0
-  awk '{print $14 + $15}' "/proc/$pid/stat" 2>/dev/null || true
-}
+# Ensure psutil is available; install it into the venv if missing.
+if ! "$PYTHON" -c "import psutil" 2>/dev/null; then
+  log "psutil not found — installing into venv …"
+  "$PYTHON" -m pip install --quiet psutil
+fi
 
-# Sum (rss_kb, cpu_pct) for all wasmedge processes (short-lived, per-request).
-# Lifetime-average cpu% is acceptable here; these columns are marked NA in the
-# analysis CSV anyway.
-sample_wasmedge_sum() {
-  local rss_sum cpu_sum
-  rss_sum="$(ps -Ao comm,rss  | awk '$1 ~ /^wasmedge/ {s+=$2} END{print s+0}')"
-  cpu_sum="$(ps -Ao comm,%cpu | awk '$1 ~ /^wasmedge/ {s+=$2} END{printf "%.2f\n", s+0}')"
-  echo "$rss_sum,$cpu_sum"
-}
+SAMPLER="$ROOT/scripts/sampler.py"
 
-# Sampler body — runs as a direct background job (not inside a command substitution)
-# so that $! in the caller is always the real loop PID.
-#
-# CPU measurement strategy:
-#   On Linux  : delta of utime+stime ticks from /proc/$pid/stat between consecutive
-#               samples → instantaneous CPU% over the ~0.2 s interval.
-#   On macOS  : fall back to ps lifetime-average %cpu (less accurate but acceptable
-#               since the Linux VM is the primary benchmark target).
+# _sampler_loop: start sampler.py as a background job.
+# Args: mode pid out [sample_pid]
 _sampler_loop() {
-  local mode="$1"        # gateway | wasmedge
-  local pid="$2"         # liveness pid — loop exits when this pid dies
-  local out="$3"
-  local sample_pid="${4:-$pid}"  # pid to sample RSS/CPU from
-
-  echo "ts_ms,rss_kb,cpu_pct" > "$out"
-  set +e   # don't let sampling failures kill this background job
-
-  # Timer ticks per second (Linux: usually 100)
-  local CLK_TCK
-  CLK_TCK="$(getconf CLK_TCK 2>/dev/null || echo 100)"
-
-  local prev_ticks="" prev_epoch_ms=""
-
-  _emit_sample() {
-    local rss cpu_pct ticks now_ms
-    now_ms="$(ts_ms)"
-
-    if [[ "$mode" == "gateway" ]]; then
-      rss="$(_rss_kb "$sample_pid" 2>/dev/null)"
-      ticks="$(_cpu_ticks "$sample_pid" 2>/dev/null)"
-    else
-      local wsum
-      wsum="$(sample_wasmedge_sum 2>/dev/null)"
-      rss="${wsum%,*}"
-      cpu_pct="${wsum#*,}"
-      [[ -n "$rss" ]] && echo "$now_ms,$rss,$cpu_pct" >> "$out"
-      return
-    fi
-
-    # Compute instantaneous CPU% from tick delta (Linux).
-    # Fall back to ps lifetime average when /proc is unavailable (macOS).
-    cpu_pct="0.00"
-    if [[ -n "$ticks" && -n "$prev_ticks" && -n "$prev_epoch_ms" ]]; then
-      local delta_ticks=$(( ticks - prev_ticks ))
-      local delta_ms=$(( now_ms - prev_epoch_ms ))
-      if (( delta_ms > 0 && delta_ticks >= 0 )); then
-        cpu_pct="$(awk -v dt="$delta_ticks" -v dms="$delta_ms" -v clk="$CLK_TCK" \
-          'BEGIN{ printf "%.2f", (dt/clk)/(dms/1000.0)*100 }')"
-      fi
-    elif [[ -z "$ticks" ]]; then
-      # macOS fallback: lifetime average is the best we have
-      cpu_pct="$(ps -o %cpu= -p "$sample_pid" 2>/dev/null | awk '{print $1}' || echo 0.00)"
-    fi
-
-    prev_ticks="$ticks"
-    prev_epoch_ms="$now_ms"
-
-    [[ -n "$rss" ]] && echo "$now_ms,$rss,$cpu_pct" >> "$out"
-  }
-
-  # Immediate first sample (seeds prev_ticks; cpu_pct will be 0 for this one)
-  _emit_sample
-
-  while kill -0 "$pid" >/dev/null 2>&1; do
-    sleep 0.2
-    _emit_sample
-  done
+  local mode="$1" pid="$2" out="$3" sample_pid="${4:-$2}"
+  "$PYTHON" "$SAMPLER" \
+    --mode "$mode" \
+    --pid "$pid" \
+    --sample-pid "$sample_pid" \
+    --out "$out" \
+    --interval 0.2 &
 }
 
 
