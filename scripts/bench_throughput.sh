@@ -96,13 +96,15 @@ _sampler_loop() {
 }
 
 
-# Aggregate sampler CSV -> avg_rss,max_rss,avg_cpu,max_cpu
-agg_samples() {
-  local in="$1"
-  awk -F',' '
+# Aggregate sampler CSV rows within the [t_start_ms, t_end_ms] window.
+# Slicing by time lets one continuous sampler cover all workload × conns runs.
+agg_samples_range() {
+  local in="$1" t_start="$2" t_end="$3"
+  awk -F',' -v ts="$t_start" -v te="$t_end" '
     NR==1{next}
     {
-      rss=$2+0; cpu=$3+0;
+      t=$1+0; rss=$2+0; cpu=$3+0;
+      if(t < ts || t > te) next;
       rss_sum+=rss; cpu_sum+=cpu; n+=1;
       if(rss>rss_max) rss_max=rss;
       if(cpu>cpu_max) cpu_max=cpu;
@@ -179,6 +181,30 @@ bench_variant() {
     exit 1
   fi
 
+  # Start one sampler per variant now that the gateway is fully up.
+  # Attaching after wait_http_200 means the process is stable — no exec race.
+  # The sampler writes a continuous stream; each wrk window is sliced by timestamp.
+  local gw_sample_pid="$pid"
+  if [[ "$variant" == "native_docker" ]]; then
+    local container_name="gateway-native-${PORT}"
+    local cpid
+    cpid="$(docker inspect --format '{{.State.Pid}}' "$container_name" 2>/dev/null || true)"
+    [[ "$cpid" =~ ^[0-9]+$ && "$cpid" != "0" ]] && gw_sample_pid="$cpid"
+  fi
+
+  local gw_samples we_samples
+  gw_samples="$RESULTS_DIR/samples_${variant}_gw.csv"
+  we_samples="$RESULTS_DIR/samples_${variant}_we.csv"
+
+  _sampler_loop gateway "$pid" "$gw_samples" "$gw_sample_pid" &
+  sampler_gw_pid=$!
+  _sampler_loop wasmedge "$pid" "$we_samples" &
+  sampler_we_pid=$!
+
+  sleep 0.3
+  kill -0 "$sampler_gw_pid" 2>/dev/null \
+    || log "  WARN: gateway sampler (pid=$sampler_gw_pid) exited early — rss/cpu will be 0"
+
   # Determine which connection levels to run
   local conns_list="${CONNS_LIST:-$CONNS_DEFAULT}"
 
@@ -220,30 +246,11 @@ bench_variant() {
       local raw
       raw="$RESULTS_DIR/wrk_${variant}_${workload}_${conns}_$(date +%Y%m%d_%H%M%S).txt"
 
-      # Start samplers directly with & so $! is the real loop PID — no command substitution.
-      local gw_samples we_samples
-      gw_samples="$RESULTS_DIR/samples_${variant}_${workload}_${conns}_gw.csv"
-      we_samples="$RESULTS_DIR/samples_${variant}_${workload}_${conns}_we.csv"
+      # Bracket the wrk run with millisecond timestamps so we can slice the
+      # continuous sampler stream to just the samples from this window.
+      local t_start t_end
+      t_start="$(ts_ms)"
 
-      # For native_docker: $pid is the 'docker run' CLI (tiny RSS, 0 CPU).
-      # Get the container's real host PID so the sampler measures the gateway process.
-      local gw_sample_pid="$pid"
-      if [[ "$variant" == "native_docker" ]]; then
-        local container_name="gateway-native-${PORT}"
-        local cpid
-        cpid="$(docker inspect --format '{{.State.Pid}}' "$container_name" 2>/dev/null || true)"
-        [[ "$cpid" =~ ^[0-9]+$ && "$cpid" != "0" ]] && gw_sample_pid="$cpid"
-      fi
-
-      _sampler_loop gateway "$pid" "$gw_samples" "$gw_sample_pid" &
-      sampler_gw_pid=$!
-      _sampler_loop wasmedge "$pid" "$we_samples" &
-      sampler_we_pid=$!
-
-      # Brief pause then verify samplers are alive (diagnose silent failures)
-      sleep 0.3
-      kill -0 "$sampler_gw_pid" 2>/dev/null \
-        || log "  WARN: gateway sampler (pid=$sampler_gw_pid) exited early — rss/cpu will be 0"
       # Run wrk with a hard timeout (duration + 30s cushion) to prevent hangs
       local wrk_timeout=$(( duration_s + 30 ))
       if [[ -n "$TIMEOUT_CMD" ]]; then
@@ -252,11 +259,7 @@ bench_variant() {
         wrk -t"$THREADS" -c"$conns" -d"$DURATION" "$url" | tee "$raw" >/dev/null
       fi
 
-      # Stop samplers and wait for them to flush writes before reading CSVs
-      kill "$sampler_gw_pid" >/dev/null 2>&1 || true
-      kill "$sampler_we_pid" >/dev/null 2>&1 || true
-      wait "$sampler_gw_pid" 2>/dev/null || true
-      wait "$sampler_we_pid" 2>/dev/null || true
+      t_end="$(ts_ms)"
 
       # Parse wrk stats
       local parsed rps lat_ms
@@ -264,10 +267,10 @@ bench_variant() {
       rps="${parsed%,*}"
       lat_ms="${parsed#*,}"
 
-      # Aggregate samples
+      # Aggregate sampler rows that fall inside this run's time window
       local gw_agg we_agg
-      gw_agg="$(agg_samples "$gw_samples")" # avg_rss,max_rss,avg_cpu,max_cpu
-      we_agg="$(agg_samples "$we_samples")"
+      gw_agg="$(agg_samples_range "$gw_samples" "$t_start" "$t_end")" # avg_rss,max_rss,avg_cpu,max_cpu
+      we_agg="$(agg_samples_range "$we_samples" "$t_start" "$t_end")"
 
       local gw_rss_avg gw_rss_max gw_cpu_avg gw_cpu_max
       local we_rss_avg we_rss_max we_cpu_avg we_cpu_max
