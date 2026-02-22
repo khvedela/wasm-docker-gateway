@@ -7,4 +7,4 @@ set -a
 source ./configs/bench.env
 set +a
 
-exec cargo run -p gateway_native --release
+exec "$ROOT/target/release/gateway_native"

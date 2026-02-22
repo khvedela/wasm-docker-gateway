@@ -103,7 +103,7 @@ agg_samples_range() {
   awk -F',' -v ts="$t_start" -v te="$t_end" '
     NR==1{next}
     {
-      t=$1+0; rss=$2+0; cpu=$3+0;
+      t=$1+0; if (t > 0 && t < 1000000000000) t = t * 1000; rss=$2+0; cpu=$3+0;
       if(t < ts || t > te) next;
       rss_sum+=rss; cpu_sum+=cpu; n+=1;
       if(rss>rss_max) rss_max=rss;
@@ -161,7 +161,7 @@ bench_variant() {
   log "starting $variant on :$PORT"
   local server_log
   server_log="$RESULTS_DIR/${variant}_server_$(date +%Y%m%d_%H%M%S).log"
-  bash -lc "$cmd" >"$server_log" 2>&1 &
+  eval "$cmd" >"$server_log" 2>&1 &
   local pid=$!
 
   # Ensure we always clean up on exit/interrupt
@@ -189,7 +189,11 @@ bench_variant() {
     local container_name="gateway-native-${PORT}"
     local cpid
     cpid="$(docker inspect --format '{{.State.Pid}}' "$container_name" 2>/dev/null || true)"
-    [[ "$cpid" =~ ^[0-9]+$ && "$cpid" != "0" ]] && gw_sample_pid="$cpid"
+    if [[ -z "$cpid" || "$cpid" == "0" || ! "$cpid" =~ ^[0-9]+$ ]]; then
+      echo "ERROR: failed to resolve valid container PID for ${container_name} (got: '${cpid}')" >&2
+      exit 1
+    fi
+    gw_sample_pid="$cpid"
   fi
 
   local gw_samples we_samples
@@ -303,7 +307,7 @@ bench_variant() {
 bench_variant "native_local" \
   "set -a; source \"$ROOT/configs/bench.env\"; set +a
    exec \"$ROOT/target/release/gateway_native\""
-bench_variant "native_docker" "PORT=$PORT ./scripts/run_docker.sh"
+bench_variant "native_docker" "PORT=$PORT exec \"$ROOT/scripts/run_docker.sh\""
 bench_variant "wasm_host_cli" \
   "set -a; source \"$ROOT/configs/bench.env\"; set +a
    WASM_MODULE_PATH=\"$ROOT/gateway_logic.wasm\" exec \"$ROOT/target/release/gateway_host\""

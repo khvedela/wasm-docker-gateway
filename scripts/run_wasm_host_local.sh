@@ -10,4 +10,4 @@ set +a
 : "${WASM_MODULE_PATH:=$ROOT/gateway_logic.wasm}"
 export WASM_MODULE_PATH
 
-exec cargo run -p gateway_host --release
+exec "$ROOT/target/release/gateway_host"

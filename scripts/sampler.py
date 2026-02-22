@@ -126,8 +126,6 @@ def main() -> None:
         dbg(f"entering sample loop (interval={args.interval}s)")
         n_samples = 0
         while is_alive(args.pid):
-            time.sleep(args.interval)
-
             try:
                 if args.mode == "wasmedge":
                     rss_kb, cpu_pct = sample_wasmedge()
@@ -150,7 +148,10 @@ def main() -> None:
 
             except Exception as exc:
                 dbg(f"sample error: {exc}")
+                time.sleep(args.interval)
                 continue
+
+            time.sleep(args.interval)
 
         dbg(f"EXIT: liveness_pid={args.pid} died — wrote {n_samples} samples")
 
