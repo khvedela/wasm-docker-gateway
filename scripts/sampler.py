@@ -72,6 +72,12 @@ def sample_wasmedge() -> tuple[int, float]:
     return rss_kb, cpu_pct
 
 
+def dbg(msg: str) -> None:
+    """Timestamped debug line to stderr (always flushed)."""
+    t = time.strftime("%H:%M:%S")
+    print(f"[sampler {t}] {msg}", file=sys.stderr, flush=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--pid",        type=int, required=True,
@@ -84,6 +90,9 @@ def main() -> None:
     args = parser.parse_args()
 
     sample_pid = args.sample_pid if args.sample_pid is not None else args.pid
+
+    dbg(f"start mode={args.mode} liveness_pid={args.pid} sample_pid={sample_pid} out={args.out}")
+    dbg(f"pid_exists(liveness)={psutil.pid_exists(args.pid)}  pid_exists(sample)={psutil.pid_exists(sample_pid)}")
 
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     signal.signal(signal.SIGINT,  lambda *_: sys.exit(0))
@@ -101,10 +110,21 @@ def main() -> None:
                     proc = psutil.Process(sample_pid)
                     proc.cpu_percent()  # prime; discard
                     break
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
+                    dbg(f"retry psutil.Process({sample_pid}): {e}")
                     proc = None
                     time.sleep(0.05)
+            if proc is None:
+                dbg(f"WARN: could not attach to sample_pid={sample_pid} after 2s retry — will try in loop")
+            else:
+                dbg(f"attached to sample_pid={sample_pid}: {proc.name()}")
 
+        if not is_alive(args.pid):
+            dbg(f"EXIT: liveness_pid={args.pid} not alive at loop start — exiting")
+            return
+
+        dbg(f"entering sample loop (interval={args.interval}s)")
+        n_samples = 0
         while is_alive(args.pid):
             time.sleep(args.interval)
 
@@ -126,10 +146,13 @@ def main() -> None:
                     rss_kb, cpu_pct = result
 
                 f.write(f"{ts_ms()},{rss_kb},{cpu_pct:.2f}\n")
+                n_samples += 1
 
             except Exception as exc:
-                print(f"sampler warning: {exc}", file=sys.stderr)
+                dbg(f"sample error: {exc}")
                 continue
+
+        dbg(f"EXIT: liveness_pid={args.pid} died — wrote {n_samples} samples")
 
 
 if __name__ == "__main__":

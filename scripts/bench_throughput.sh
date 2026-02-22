@@ -195,15 +195,21 @@ bench_variant() {
   local gw_samples we_samples
   gw_samples="$RESULTS_DIR/samples_${variant}_gw.csv"
   we_samples="$RESULTS_DIR/samples_${variant}_we.csv"
+  local sampler_gw_log sampler_we_log
+  sampler_gw_log="$RESULTS_DIR/sampler_${variant}_gw.log"
+  sampler_we_log="$RESULTS_DIR/sampler_${variant}_we.log"
 
-  _sampler_loop gateway "$pid" "$gw_samples" "$gw_sample_pid" &
+  _sampler_loop gateway "$pid" "$gw_samples" "$gw_sample_pid" 2>"$sampler_gw_log" &
   sampler_gw_pid=$!
-  _sampler_loop wasmedge "$pid" "$we_samples" &
+  _sampler_loop wasmedge "$pid" "$we_samples" 2>"$sampler_we_log" &
   sampler_we_pid=$!
 
   sleep 0.3
-  kill -0 "$sampler_gw_pid" 2>/dev/null \
-    || log "  WARN: gateway sampler (pid=$sampler_gw_pid) exited early — rss/cpu will be 0"
+  if ! kill -0 "$sampler_gw_pid" 2>/dev/null; then
+    log "  WARN: gateway sampler (pid=$sampler_gw_pid) exited early — rss/cpu will be 0"
+    log "  sampler log ($sampler_gw_log):"
+    cat "$sampler_gw_log" >&2 || true
+  fi
 
   # Determine which connection levels to run
   local conns_list="${CONNS_LIST:-$CONNS_DEFAULT}"
