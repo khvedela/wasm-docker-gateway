@@ -85,36 +85,51 @@ def main() -> None:
 
     sample_pid = args.sample_pid if args.sample_pid is not None else args.pid
 
-    # Ignore SIGTERM/SIGINT gracefully so the finally block always flushes.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     signal.signal(signal.SIGINT,  lambda *_: sys.exit(0))
 
-    proc = None
-    if args.mode == "gateway":
-        try:
-            proc = psutil.Process(sample_pid)
-            # Prime the CPU counter — first cpu_percent() always returns 0.0
-            proc.cpu_percent()
-        except psutil.NoSuchProcess:
-            pass
-
-    with open(args.out, "w", buffering=1) as f:   # line-buffered
+    with open(args.out, "w", buffering=1) as f:
         f.write("ts_ms,rss_kb,cpu_pct\n")
+
+        # Prime the CPU interval counter — first cpu_percent() always returns 0.0.
+        # Retry up to 2 s in case the process is still exec()-ing at sampler start.
+        proc = None
+        if args.mode == "gateway":
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                try:
+                    proc = psutil.Process(sample_pid)
+                    proc.cpu_percent()  # prime; discard
+                    break
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    proc = None
+                    time.sleep(0.05)
 
         while is_alive(args.pid):
             time.sleep(args.interval)
 
-            if args.mode == "wasmedge":
-                rss_kb, cpu_pct = sample_wasmedge()
-            else:
-                if proc is None:
-                    break
-                result = sample_gateway(proc)
-                if result is None:
-                    break
-                rss_kb, cpu_pct = result
+            try:
+                if args.mode == "wasmedge":
+                    rss_kb, cpu_pct = sample_wasmedge()
+                else:
+                    # Re-attach if proc was None (process exec'd after sampler started)
+                    if proc is None:
+                        try:
+                            proc = psutil.Process(sample_pid)
+                            proc.cpu_percent()
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            continue
+                    result = sample_gateway(proc)
+                    if result is None:
+                        proc = None   # process gone — try to re-attach next iteration
+                        continue
+                    rss_kb, cpu_pct = result
 
-            f.write(f"{ts_ms()},{rss_kb},{cpu_pct:.2f}\n")
+                f.write(f"{ts_ms()},{rss_kb},{cpu_pct:.2f}\n")
+
+            except Exception as exc:
+                print(f"sampler warning: {exc}", file=sys.stderr)
+                continue
 
 
 if __name__ == "__main__":

@@ -240,6 +240,10 @@ bench_variant() {
       _sampler_loop wasmedge "$pid" "$we_samples" &
       sampler_we_pid=$!
 
+      # Brief pause then verify samplers are alive (diagnose silent failures)
+      sleep 0.3
+      kill -0 "$sampler_gw_pid" 2>/dev/null \
+        || log "  WARN: gateway sampler (pid=$sampler_gw_pid) exited early — rss/cpu will be 0"
       # Run wrk with a hard timeout (duration + 30s cushion) to prevent hangs
       local wrk_timeout=$(( duration_s + 30 ))
       if [[ -n "$TIMEOUT_CMD" ]]; then
