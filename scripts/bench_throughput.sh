@@ -160,10 +160,34 @@ url_for_workload() {
   esac
 }
 
+# Best-effort pre-clean for stale listeners that can make health checks pass
+# against an old process from a previous interrupted run.
+free_bench_port() {
+  local port="$1"
+  local -a pids=()
+
+  if command -v lsof >/dev/null 2>&1; then
+    while IFS= read -r p; do
+      [[ -n "$p" ]] && pids+=("$p")
+    done < <(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | sort -u)
+  elif command -v fuser >/dev/null 2>&1; then
+    while IFS= read -r p; do
+      [[ -n "$p" ]] && pids+=("$p")
+    done < <(fuser -n tcp "$port" 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -u || true)
+  fi
+
+  if (( ${#pids[@]} > 0 )); then
+    log "port :$port already in use by pid(s): ${pids[*]} — terminating stale listener(s)"
+    kill -9 "${pids[@]}" >/dev/null 2>&1 || true
+    sleep 0.1
+  fi
+}
+
 bench_variant() {
   local variant="$1"
   local cmd="$2"
 
+  free_bench_port "$PORT"
   log "starting $variant on :$PORT"
   local server_log
   server_log="$RESULTS_DIR/${variant}_server_$(date +%Y%m%d_%H%M%S).log"
@@ -191,6 +215,16 @@ bench_variant() {
     echo "ERROR: launched PID $pid for $variant is not alive after health check" >&2
     tail -n 160 "$server_log" || true
     exit 1
+  fi
+
+  if [[ "$variant" != "native_docker" ]] && command -v lsof >/dev/null 2>&1; then
+    local listener_pid
+    listener_pid="$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | head -n1 || true)"
+    if [[ -n "$listener_pid" && "$listener_pid" != "$pid" ]]; then
+      echo "ERROR: health endpoint is not served by launched PID (expected $pid, listener $listener_pid)" >&2
+      tail -n 160 "$server_log" || true
+      exit 1
+    fi
   fi
 
   # Start one sampler per variant now that the gateway is fully up.
