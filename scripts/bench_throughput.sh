@@ -83,16 +83,16 @@ fi
 
 SAMPLER="$ROOT/scripts/sampler.py"
 
-# _sampler_loop: start sampler.py as a background job.
+# _sampler_loop: exec sampler.py — called with & at the call site so $! = Python PID.
 # Args: mode pid out [sample_pid]
 _sampler_loop() {
   local mode="$1" pid="$2" out="$3" sample_pid="${4:-$2}"
-  "$PYTHON" "$SAMPLER" \
+  exec "$PYTHON" "$SAMPLER" \
     --mode "$mode" \
     --pid "$pid" \
     --sample-pid "$sample_pid" \
     --out "$out" \
-    --interval 0.2 &
+    --interval 0.2
 }
 
 
