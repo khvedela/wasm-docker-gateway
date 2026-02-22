@@ -179,13 +179,30 @@ free_bench_port() {
   if (( ${#pids[@]} > 0 )); then
     log "port :$port already in use by pid(s): ${pids[*]} — terminating stale listener(s)"
     kill -9 "${pids[@]}" >/dev/null 2>&1 || true
-    sleep 0.1
+    for p in "${pids[@]}"; do
+      wait "$p" 2>/dev/null || true
+    done
   fi
+
+  for _ in $(seq 1 100); do
+    local still_busy=""
+    if command -v lsof >/dev/null 2>&1; then
+      still_busy="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | head -n1 || true)"
+    elif command -v fuser >/dev/null 2>&1; then
+      still_busy="$(fuser -n tcp "$port" 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+$' | head -n1 || true)"
+    fi
+    [[ -z "$still_busy" ]] && return 0
+    sleep 0.05
+  done
+
+  echo "ERROR: port :$port is still in use after cleanup" >&2
+  return 1
 }
 
 bench_variant() {
   local variant="$1"
   local cmd="$2"
+  local container_name="gateway-native-${PORT}"
 
   free_bench_port "$PORT"
   log "starting $variant on :$PORT"
@@ -201,7 +218,19 @@ bench_variant() {
     # best-effort: stop samplers then server
     [[ -n "${sampler_gw_pid}" ]] && kill "${sampler_gw_pid}" >/dev/null 2>&1 || true
     [[ -n "${sampler_we_pid}" ]] && kill "${sampler_we_pid}" >/dev/null 2>&1 || true
+    [[ -n "${sampler_gw_pid}" ]] && wait "${sampler_gw_pid}" 2>/dev/null || true
+    [[ -n "${sampler_we_pid}" ]] && wait "${sampler_we_pid}" 2>/dev/null || true
+
+    if [[ "$variant" == "native_docker" ]]; then
+      docker rm -f "$container_name" >/dev/null 2>&1 || true
+    fi
+
+    kill "$pid" >/dev/null 2>&1 || true
+    sleep 0.1
     kill -9 "$pid" >/dev/null 2>&1 || true
+    wait "$pid" 2>/dev/null || true
+
+    free_bench_port "$PORT" || true
   }
   trap cleanup_variant EXIT INT TERM
 
@@ -232,7 +261,6 @@ bench_variant() {
   # The sampler writes a continuous stream; each wrk window is sliced by timestamp.
   local gw_sample_pid="$pid"
   if [[ "$variant" == "native_docker" ]]; then
-    local container_name="gateway-native-${PORT}"
     local cpid
     cpid=""
     for _ in $(seq 1 40); do
