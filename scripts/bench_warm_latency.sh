@@ -116,6 +116,20 @@ port_has_listener() {
 free_bench_port() {
   local port="$1"
   local -a pids=()
+  local -a docker_ids=()
+
+  # In some environments listener PID discovery is restricted; clear known
+  # benchmark containers by name/port first so docker-proxy does not block us.
+  if command -v docker >/dev/null 2>&1; then
+    docker rm -f "gateway-native-${port}" >/dev/null 2>&1 || true
+    while IFS= read -r cid; do
+      [[ -n "$cid" ]] && docker_ids+=("$cid")
+    done < <(docker ps --format '{{.ID}} {{.Ports}}' 2>/dev/null | awk -v p=":${port}->" '$0 ~ p {print $1}')
+    if (( ${#docker_ids[@]} > 0 )); then
+      log "port :$port mapped by docker container(s): ${docker_ids[*]} — removing"
+      docker rm -f "${docker_ids[@]}" >/dev/null 2>&1 || true
+    fi
+  fi
 
   while IFS= read -r p; do
     [[ -n "$p" ]] && pids+=("$p")

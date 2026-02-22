@@ -8,6 +8,7 @@ require_cmd jq
 
 PORT="${PORT:-18081}"
 COLD_START_RUNS="${COLD_START_RUNS:-20}"
+NATIVE_DOCKER_CONTAINER="gateway-native-${PORT}"
 
 cd "$ROOT"
 start_upstream
@@ -24,6 +25,7 @@ echo "variant,run_ms" > "$OUT"
 bench_one() {
   local variant="$1"
   local cmd="$2"
+  local docker_cleanup="docker rm -f \"$NATIVE_DOCKER_CONTAINER\" >/dev/null 2>&1 || true"
 
   log "cold-start bench: $variant on :$PORT"
   local json="$RESULTS_DIR/tmp_${variant}_${TS}.json"
@@ -31,6 +33,7 @@ bench_one() {
   hyperfine --warmup 0 --runs "$COLD_START_RUNS" --export-json "$json" \
     "bash -lc '
       set -euo pipefail
+      ${docker_cleanup}
       ($cmd) >\"$RESULTS_DIR/${variant}_${TS}.log\" 2>&1 &
       pid=\$!
       for i in \$(seq 1 600); do
@@ -39,6 +42,7 @@ bench_one() {
       done
       curl -fsS --max-time 5 http://127.0.0.1:${PORT}/ >/dev/null
       kill -9 \$pid >/dev/null 2>&1 || true
+      ${docker_cleanup}
     '"
 
   # hyperfine < 1.16 used "times"; >= 1.16 renamed it to "individual_times".
@@ -53,6 +57,10 @@ bench_one() {
   # Count only the rows added by this variant (lines now minus lines before jq ran)
   nrows=$(( $(wc -l < "$OUT") - rows_before ))
   log "  $variant: wrote $nrows rows to $(basename "$OUT")"
+
+  if [[ "$variant" == "native_docker" ]]; then
+    docker rm -f "$NATIVE_DOCKER_CONTAINER" >/dev/null 2>&1 || true
+  fi
 }
 
 # Invoke the pre-built binaries directly rather than via `cargo run`.
