@@ -306,9 +306,18 @@ bench_variant() {
   log "appended aggregated results to $SUM"
 }
 
-bench_variant "native_local"  "./scripts/run_native_local.sh"
+# Invoke pre-built binaries directly (not via cargo run) so that $pid in
+# bench_variant is the actual gateway process, not an intermediate cargo/shell
+# wrapper.  Cargo forks the binary as a child and blocks in wait(); after the
+# first wrk run cargo has near-zero RSS, making all subsequent memory samples
+# read 0.  Directly exec-ing the binary avoids this entirely.
+bench_variant "native_local" \
+  "set -a; source \"$ROOT/configs/bench.env\"; set +a
+   exec \"$ROOT/target/release/gateway_native\""
 bench_variant "native_docker" "PORT=$PORT ./scripts/run_docker.sh"
-bench_variant "wasm_host_cli" "WASM_MODULE_PATH=$ROOT/gateway_logic.wasm ./scripts/run_wasm_host_local.sh"
+bench_variant "wasm_host_cli" \
+  "set -a; source \"$ROOT/configs/bench.env\"; set +a
+   WASM_MODULE_PATH=\"$ROOT/gateway_logic.wasm\" exec \"$ROOT/target/release/gateway_host\""
 
 # ---------------------------------------------------------------------------
 # ANALYSIS CSV
