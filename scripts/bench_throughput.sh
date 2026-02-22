@@ -30,13 +30,16 @@ start_upstream
 log "pre-building native binaries (cargo build --release) …"
 cargo build --release --bin gateway_native --bin gateway_host
 
-# Write a single, stable aggregated CSV (timestamps are columns, not filenames)
+# Aggregated CSV — written fresh each run so stale data from prior runs
+# never pollutes averages.  Set APPEND_RESULTS=1 to accumulate across runs.
 AGG_DIR="$RESULTS_DIR/aggregated"
 mkdir -p "$AGG_DIR"
 SUM="$AGG_DIR/throughput.csv"
 
-# Add header once
-if [[ ! -f "$SUM" ]]; then
+if [[ "${APPEND_RESULTS:-0}" == "1" && -f "$SUM" ]]; then
+  log "APPEND_RESULTS=1 — appending to existing $SUM"
+else
+  [[ -f "$SUM" ]] && log "truncating previous $SUM (set APPEND_RESULTS=1 to keep)"
   echo "run_ts,variant,workload,threads,conns,duration_s,rps,latency_mean_ms,gateway_rss_avg_kb,gateway_rss_max_kb,gateway_cpu_avg,gateway_cpu_max,wasmedge_rss_avg_kb,wasmedge_rss_max_kb,wasmedge_cpu_avg,wasmedge_cpu_max" > "$SUM"
 fi
 

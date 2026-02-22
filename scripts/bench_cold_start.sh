@@ -43,17 +43,26 @@ bench_one() {
 
   # hyperfine < 1.16 used "times"; >= 1.16 renamed it to "individual_times".
   # Support both with a fallback expression.
+  local rows_before
+  rows_before=$(wc -l < "$OUT")
   jq -r --arg variant "$variant" \
     '(.results[0].individual_times // .results[0].times)[] | "\($variant),\(. * 1000)"' \
     "$json" >> "$OUT"
 
   local nrows
-  nrows=$(( $(wc -l < "$OUT") - 1 ))
+  # Count only the rows added by this variant (lines now minus lines before jq ran)
+  nrows=$(( $(wc -l < "$OUT") - rows_before ))
   log "  $variant: wrote $nrows rows to $(basename "$OUT")"
 }
 
-bench_one "native_local"  "./scripts/run_native_local.sh"
-bench_one "wasm_host_cli" "WASM_MODULE_PATH=$ROOT/gateway_logic.wasm ./scripts/run_wasm_host_local.sh"
+# Invoke the pre-built binaries directly rather than via `cargo run`.
+# Even with a pre-built binary, `cargo run` adds ~200-500 ms of build-graph
+# checking overhead — which would unfairly inflate native cold-start times
+# compared to native_docker, which starts the binary directly with `docker run`.
+bench_one "native_local" \
+  "set -a; source \"$ROOT/configs/bench.env\"; set +a; exec \"$ROOT/target/release/gateway_native\""
+bench_one "wasm_host_cli" \
+  "set -a; source \"$ROOT/configs/bench.env\"; set +a; WASM_MODULE_PATH=\"$ROOT/gateway_logic.wasm\" exec \"$ROOT/target/release/gateway_host\""
 
 # native_docker: pre-build the image once so the 20 hyperfine iterations only
 # measure container startup time, not image build time.
