@@ -4,7 +4,6 @@ use sha2::{Digest, Sha256};
 use std::env;
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
-use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use url::Url;
@@ -14,6 +13,7 @@ const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_REQ_BODY_BYTES: usize = 2 * 1024 * 1024;
 const MAX_RESP_BYTES: usize = 10 * 1024 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
+const GATEWAY_VARIANT: &str = "wasm-host";
 
 static COUNTER: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 
@@ -79,6 +79,7 @@ struct Upstream {
     host: String,
     port: u16,
     base_path: String,
+    raw_url: String,
 }
 
 fn parse_upstream(s: &str) -> Result<Upstream> {
@@ -101,13 +102,14 @@ fn parse_upstream(s: &str) -> Result<Upstream> {
         host,
         port,
         base_path,
+        raw_url: s.to_string(),
     })
 }
 
 fn handle_client(
     client: &mut TcpStream,
     upstream: &Upstream,
-    wasm_module_path: &str,
+    _wasm_module_path: &str,
 ) -> Result<()> {
     client.set_read_timeout(Some(IO_TIMEOUT)).ok();
     client.set_write_timeout(Some(IO_TIMEOUT)).ok();
@@ -119,21 +121,22 @@ fn handle_client(
     let req = parse_request_head(&head_bytes)?;
 
     if req.method == "GET" && req.path == "/health" {
-        let resp = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK";
-        client.write_all(resp).ok();
+        let resp = build_response("HTTP/1.1 200 OK", b"OK", "health", Some("text/plain"), &[]);
+        client.write_all(&resp).ok();
         client.flush().ok();
         client.shutdown(Shutdown::Both).ok();
         return Ok(());
     }
 
     if req.method == "GET" && (req.path == "/" || req.path.starts_with("/?")) {
-        let body = b"hello";
-        let resp = format!(
-            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            body.len()
+        let resp = build_response(
+            "HTTP/1.1 200 OK",
+            b"hello",
+            "hello",
+            Some("text/plain"),
+            &[],
         );
-        client.write_all(resp.as_bytes())?;
-        client.write_all(body)?;
+        client.write_all(&resp)?;
         client.flush().ok();
         client.shutdown(std::net::Shutdown::Both).ok();
         return Ok(());
@@ -145,15 +148,14 @@ fn handle_client(
             .unwrap_or(50_000);
 
         let result = cpu_heavy(iters);
-        let body = result.as_bytes();
-
-        let resp = format!(
-        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n",
-        body.len()
-    );
-
-        client.write_all(resp.as_bytes())?;
-        client.write_all(body)?;
+        let resp = build_response(
+            "HTTP/1.1 200 OK",
+            result.as_bytes(),
+            "compute",
+            Some("text/plain"),
+            &[],
+        );
+        client.write_all(&resp)?;
         client.flush().ok();
         client.shutdown(std::net::Shutdown::Both).ok();
         return Ok(());
@@ -162,15 +164,14 @@ fn handle_client(
     if req.method == "GET" && req.path.starts_with("/state") {
         let value = COUNTER.fetch_add(1, Ordering::SeqCst);
         let body_str = value.to_string();
-        let body = body_str.as_bytes();
-
-        let resp = format!(
-        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n",
-        body.len()
-    );
-
-        client.write_all(resp.as_bytes())?;
-        client.write_all(body)?;
+        let resp = build_response(
+            "HTTP/1.1 200 OK",
+            body_str.as_bytes(),
+            "state",
+            Some("text/plain"),
+            &[],
+        );
+        client.write_all(&resp)?;
         client.flush().ok();
         client.shutdown(std::net::Shutdown::Both).ok();
         return Ok(());
@@ -188,19 +189,14 @@ fn handle_client(
 
     let resp_bytes = read_all_response(&mut upstream_stream)?;
     let (resp_head, resp_body) = split_http_response(&resp_bytes)?;
-
-    // Transform response body via WasmEdge CLI
-    let new_body = match wasm_transform_cli(wasm_module_path, &resp_body) {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("[wasm-host] WASM ERROR: {e:#}");
-            resp_body
-        }
-    };
-
-    // Rebuild response with rewritten Content-Length + marker header
+    let upstream_status = parse_status_code_from_head(&resp_head)?;
+    let upstream_status_str = upstream_status.to_string();
+    let proxy_headers = vec![
+        ("X-Upstream-Url", upstream.raw_url.as_str()),
+        ("X-Upstream-Status", upstream_status_str.as_str()),
+    ];
     let new_resp =
-        rebuild_response_with_body_and_header(&resp_head, &new_body, "x-wasm-processed", "1")?;
+        rebuild_response_with_extra_headers(&resp_head, &resp_body, "proxy", &proxy_headers)?;
 
     client.write_all(&new_resp)?;
     client.flush().ok();
@@ -217,32 +213,6 @@ fn handle_client(
     );
 
     Ok(())
-}
-
-fn wasm_transform_cli(module_path: &str, input: &[u8]) -> Result<Vec<u8>> {
-    let mut child = Command::new("wasmedge")
-        .arg(module_path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| "spawn wasmedge")?;
-
-    {
-        let stdin = child
-            .stdin
-            .as_mut()
-            .ok_or_else(|| anyhow!("no stdin pipe"))?;
-        stdin.write_all(input).context("write stdin to wasmedge")?;
-        // Dropping stdin closes it, signaling EOF
-    }
-
-    let output = child.wait_with_output().context("wait wasmedge")?;
-    if !output.status.success() {
-        let err = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!("wasmedge failed: {}", err.trim()));
-    }
-    Ok(output.stdout)
 }
 
 #[derive(Debug)]
@@ -421,12 +391,54 @@ fn split_http_response(resp: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
     Ok((head, body))
 }
 
-/// Removes Content-Length/Connection from head, injects marker header, rewrites Content-Length, forces Connection: close.
-fn rebuild_response_with_body_and_header(
+fn parse_status_code_from_head(head: &[u8]) -> Result<u16> {
+    let head_str = std::str::from_utf8(head).context("resp head not utf8")?;
+    let status_line = head_str
+        .split("\r\n")
+        .next()
+        .ok_or_else(|| anyhow!("missing status line"))?;
+    let status = status_line
+        .split_whitespace()
+        .nth(1)
+        .ok_or_else(|| anyhow!("missing status code"))?
+        .parse::<u16>()
+        .context("invalid status code")?;
+    Ok(status)
+}
+
+fn build_response(
+    status_line: &str,
+    body: &[u8],
+    workload: &str,
+    content_type: Option<&str>,
+    extra_headers: &[(&str, &str)],
+) -> Vec<u8> {
+    let mut out = Vec::<u8>::new();
+    out.extend_from_slice(status_line.as_bytes());
+    out.extend_from_slice(b"\r\n");
+
+    if let Some(content_type) = content_type {
+        out.extend_from_slice(format!("Content-Type: {content_type}\r\n").as_bytes());
+    }
+
+    out.extend_from_slice(format!("X-Gateway-Variant: {GATEWAY_VARIANT}\r\n").as_bytes());
+    out.extend_from_slice(format!("X-Gateway-Workload: {workload}\r\n").as_bytes());
+
+    for (name, value) in extra_headers {
+        out.extend_from_slice(format!("{name}: {value}\r\n").as_bytes());
+    }
+
+    out.extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
+    out.extend_from_slice(b"Connection: close\r\n\r\n");
+    out.extend_from_slice(body);
+    out
+}
+
+fn rebuild_response_with_extra_headers(
     head: &[u8],
     body: &[u8],
-    hname: &str,
-    hval: &str,
+    workload: &str,
+    extra_headers: &[(&str, &str)],
 ) -> Result<Vec<u8>> {
     let head_str = std::str::from_utf8(head).context("resp head not utf8")?;
 
@@ -442,14 +454,24 @@ fn rebuild_response_with_body_and_header(
             continue;
         }
         let lower = line.to_ascii_lowercase();
-        if lower.starts_with("content-length:") || lower.starts_with("connection:") {
+        if lower.starts_with("content-length:")
+            || lower.starts_with("connection:")
+            || lower.starts_with("x-gateway-variant:")
+            || lower.starts_with("x-gateway-workload:")
+            || lower.starts_with("x-upstream-url:")
+            || lower.starts_with("x-upstream-status:")
+        {
             continue;
         }
         out.extend_from_slice(line.as_bytes());
         out.extend_from_slice(b"\r\n");
     }
 
-    out.extend_from_slice(format!("{hname}: {hval}\r\n").as_bytes());
+    out.extend_from_slice(format!("X-Gateway-Variant: {GATEWAY_VARIANT}\r\n").as_bytes());
+    out.extend_from_slice(format!("X-Gateway-Workload: {workload}\r\n").as_bytes());
+    for (name, value) in extra_headers {
+        out.extend_from_slice(format!("{name}: {value}\r\n").as_bytes());
+    }
     out.extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
     out.extend_from_slice(b"Connection: close\r\n\r\n");
     out.extend_from_slice(body);

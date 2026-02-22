@@ -12,6 +12,7 @@ use uuid::Uuid;
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
+const GATEWAY_VARIANT: &str = "native";
 
 static COUNTER: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 
@@ -74,6 +75,7 @@ struct Upstream {
     host: String,
     port: u16,
     base_path: String,
+    raw_url: String,
 }
 
 fn parse_upstream(s: &str) -> Result<Upstream> {
@@ -96,6 +98,7 @@ fn parse_upstream(s: &str) -> Result<Upstream> {
         host,
         port,
         base_path,
+        raw_url: s.to_string(),
     })
 }
 
@@ -110,21 +113,22 @@ fn handle_client(client: &mut TcpStream, upstream: &Upstream) -> Result<()> {
     let req = parse_request_head(&head_bytes)?;
 
     if req.method == "GET" && req.path == "/health" {
-        let resp = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK";
-        client.write_all(resp).ok();
+        let resp = build_response("HTTP/1.1 200 OK", b"OK", "health", Some("text/plain"), &[]);
+        client.write_all(&resp).ok();
         client.flush().ok();
         client.shutdown(Shutdown::Both).ok();
         return Ok(());
     }
 
     if req.method == "GET" && (req.path == "/" || req.path.starts_with("/?")) {
-        let body = b"hello";
-        let resp = format!(
-            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            body.len()
+        let resp = build_response(
+            "HTTP/1.1 200 OK",
+            b"hello",
+            "hello",
+            Some("text/plain"),
+            &[],
         );
-        client.write_all(resp.as_bytes())?;
-        client.write_all(body)?;
+        client.write_all(&resp)?;
         client.flush().ok();
         client.shutdown(std::net::Shutdown::Both).ok();
         return Ok(());
@@ -136,15 +140,14 @@ fn handle_client(client: &mut TcpStream, upstream: &Upstream) -> Result<()> {
             .unwrap_or(50_000);
 
         let result = cpu_heavy(iters);
-        let body = result.as_bytes();
-
-        let resp = format!(
-        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n",
-        body.len()
-    );
-
-        client.write_all(resp.as_bytes())?;
-        client.write_all(body)?;
+        let resp = build_response(
+            "HTTP/1.1 200 OK",
+            result.as_bytes(),
+            "compute",
+            Some("text/plain"),
+            &[],
+        );
+        client.write_all(&resp)?;
         client.flush().ok();
         client.shutdown(std::net::Shutdown::Both).ok();
         return Ok(());
@@ -153,15 +156,14 @@ fn handle_client(client: &mut TcpStream, upstream: &Upstream) -> Result<()> {
     if req.method == "GET" && req.path.starts_with("/state") {
         let value = COUNTER.fetch_add(1, Ordering::SeqCst);
         let body_str = value.to_string();
-        let body = body_str.as_bytes();
-
-        let resp = format!(
-        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n",
-        body.len()
-    );
-
-        client.write_all(resp.as_bytes())?;
-        client.write_all(body)?;
+        let resp = build_response(
+            "HTTP/1.1 200 OK",
+            body_str.as_bytes(),
+            "state",
+            Some("text/plain"),
+            &[],
+        );
+        client.write_all(&resp)?;
         client.flush().ok();
         client.shutdown(std::net::Shutdown::Both).ok();
         return Ok(());
@@ -177,7 +179,17 @@ fn handle_client(client: &mut TcpStream, upstream: &Upstream) -> Result<()> {
     upstream_stream.flush()?;
 
     let resp_bytes = read_all_response(&mut upstream_stream)?;
-    client.write_all(&resp_bytes)?;
+    let (resp_head, resp_body) = split_http_response(&resp_bytes)?;
+    let upstream_status = parse_status_code_from_head(&resp_head)?;
+    let upstream_status_str = upstream_status.to_string();
+    let proxy_headers = vec![
+        ("X-Upstream-Url", upstream.raw_url.as_str()),
+        ("X-Upstream-Status", upstream_status_str.as_str()),
+    ];
+    let rewritten =
+        rebuild_response_with_extra_headers(&resp_head, &resp_body, "proxy", &proxy_headers)?;
+
+    client.write_all(&rewritten)?;
     client.flush().ok();
     client.shutdown(Shutdown::Both).ok();
 
@@ -187,7 +199,7 @@ fn handle_client(client: &mut TcpStream, upstream: &Upstream) -> Result<()> {
         req_id,
         req.method,
         req.path,
-        resp_bytes.len(),
+        rewritten.len(),
         elapsed
     );
 
@@ -354,6 +366,99 @@ fn read_all_response(stream: &mut TcpStream) -> Result<Vec<u8>> {
     }
 
     Ok(resp)
+}
+
+fn split_http_response(resp: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
+    let header_end = find_double_crlf(resp).ok_or_else(|| anyhow!("invalid upstream response"))?;
+    let head = resp[..header_end].to_vec();
+    let body = resp[header_end + 4..].to_vec();
+    Ok((head, body))
+}
+
+fn parse_status_code_from_head(head: &[u8]) -> Result<u16> {
+    let head_str = std::str::from_utf8(head).context("resp head not utf8")?;
+    let status_line = head_str
+        .split("\r\n")
+        .next()
+        .ok_or_else(|| anyhow!("missing status line"))?;
+    let status = status_line
+        .split_whitespace()
+        .nth(1)
+        .ok_or_else(|| anyhow!("missing status code"))?
+        .parse::<u16>()
+        .context("invalid status code")?;
+    Ok(status)
+}
+
+fn build_response(
+    status_line: &str,
+    body: &[u8],
+    workload: &str,
+    content_type: Option<&str>,
+    extra_headers: &[(&str, &str)],
+) -> Vec<u8> {
+    let mut out = Vec::<u8>::new();
+    out.extend_from_slice(status_line.as_bytes());
+    out.extend_from_slice(b"\r\n");
+
+    if let Some(content_type) = content_type {
+        out.extend_from_slice(format!("Content-Type: {content_type}\r\n").as_bytes());
+    }
+
+    out.extend_from_slice(format!("X-Gateway-Variant: {GATEWAY_VARIANT}\r\n").as_bytes());
+    out.extend_from_slice(format!("X-Gateway-Workload: {workload}\r\n").as_bytes());
+
+    for (name, value) in extra_headers {
+        out.extend_from_slice(format!("{name}: {value}\r\n").as_bytes());
+    }
+
+    out.extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
+    out.extend_from_slice(b"Connection: close\r\n\r\n");
+    out.extend_from_slice(body);
+    out
+}
+
+fn rebuild_response_with_extra_headers(
+    head: &[u8],
+    body: &[u8],
+    workload: &str,
+    extra_headers: &[(&str, &str)],
+) -> Result<Vec<u8>> {
+    let head_str = std::str::from_utf8(head).context("resp head not utf8")?;
+    let mut lines = head_str.split("\r\n");
+    let status = lines.next().ok_or_else(|| anyhow!("missing status line"))?;
+
+    let mut out = Vec::<u8>::new();
+    out.extend_from_slice(status.as_bytes());
+    out.extend_from_slice(b"\r\n");
+
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        let lower = line.to_ascii_lowercase();
+        if lower.starts_with("content-length:")
+            || lower.starts_with("connection:")
+            || lower.starts_with("x-gateway-variant:")
+            || lower.starts_with("x-gateway-workload:")
+            || lower.starts_with("x-upstream-url:")
+            || lower.starts_with("x-upstream-status:")
+        {
+            continue;
+        }
+        out.extend_from_slice(line.as_bytes());
+        out.extend_from_slice(b"\r\n");
+    }
+
+    out.extend_from_slice(format!("X-Gateway-Variant: {GATEWAY_VARIANT}\r\n").as_bytes());
+    out.extend_from_slice(format!("X-Gateway-Workload: {workload}\r\n").as_bytes());
+    for (name, value) in extra_headers {
+        out.extend_from_slice(format!("{name}: {value}\r\n").as_bytes());
+    }
+    out.extend_from_slice(format!("Content-Length: {}\r\n", body.len()).as_bytes());
+    out.extend_from_slice(b"Connection: close\r\n\r\n");
+    out.extend_from_slice(body);
+    Ok(out)
 }
 
 fn find_double_crlf(buf: &[u8]) -> Option<usize> {
