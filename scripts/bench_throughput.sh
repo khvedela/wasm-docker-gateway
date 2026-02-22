@@ -186,6 +186,59 @@ listener_pids_for_port() {
       | sort -u
     return 0
   fi
+
+  # Fallback for minimal Linux environments without lsof/fuser/ss:
+  # discover listening socket inode from /proc/net/* and map inode -> PID via /proc/*/fd.
+  if [[ -r /proc/net/tcp || -r /proc/net/tcp6 ]] && command -v python3 >/dev/null 2>&1; then
+    python3 - "$port" <<'PY'
+import glob
+import os
+import sys
+
+port = int(sys.argv[1])
+want = f"{port:04X}"
+inodes = set()
+
+for path in ("/proc/net/tcp", "/proc/net/tcp6"):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            next(f, None)  # header
+            for line in f:
+                cols = line.split()
+                if len(cols) < 10:
+                    continue
+                local = cols[1]
+                state = cols[3]
+                inode = cols[9]
+                parts = local.split(":")
+                if len(parts) != 2:
+                    continue
+                if state == "0A" and parts[1].upper() == want:
+                    inodes.add(inode)
+    except OSError:
+        pass
+
+if not inodes:
+    raise SystemExit(0)
+
+pids = set()
+for fd in glob.glob("/proc/[0-9]*/fd/*"):
+    try:
+        link = os.readlink(fd)
+    except OSError:
+        continue
+    if not link.startswith("socket:[") or not link.endswith("]"):
+        continue
+    inode = link[8:-1]
+    if inode in inodes:
+        pid = fd.split("/")[2]
+        pids.add(pid)
+
+for pid in sorted(pids, key=int):
+    print(pid)
+PY
+    return 0
+  fi
 }
 
 port_has_listener() {
