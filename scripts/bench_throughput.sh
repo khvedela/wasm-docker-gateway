@@ -162,19 +162,65 @@ url_for_workload() {
 
 # Best-effort pre-clean for stale listeners that can make health checks pass
 # against an old process from a previous interrupted run.
+listener_pids_for_port() {
+  local port="$1"
+
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | sort -u
+    return 0
+  fi
+
+  if command -v fuser >/dev/null 2>&1; then
+    fuser -n tcp "$port" 2>/dev/null \
+      | tr ' ' '\n' \
+      | grep -E '^[0-9]+$' \
+      | sort -u
+    return 0
+  fi
+
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltnpH 2>/dev/null \
+      | awk -v p=":$port" '$4 ~ (p "$") {print}' \
+      | grep -oE 'pid=[0-9]+' \
+      | cut -d= -f2 \
+      | sort -u
+    return 0
+  fi
+}
+
+port_has_listener() {
+  local port="$1"
+
+  if listener_pids_for_port "$port" | grep -q .; then
+    return 0
+  fi
+
+  if command -v ss >/dev/null 2>&1; then
+    if ss -ltnH 2>/dev/null | awk -v p=":$port" '$4 ~ (p "$") {found=1; exit} END{exit !found}'; then
+      return 0
+    fi
+  fi
+
+  if command -v nc >/dev/null 2>&1 && nc -z 127.0.0.1 "$port" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if (exec 3<>"/dev/tcp/127.0.0.1/$port") >/dev/null 2>&1; then
+    exec 3>&-
+    exec 3<&-
+    return 0
+  fi
+
+  return 1
+}
+
 free_bench_port() {
   local port="$1"
   local -a pids=()
 
-  if command -v lsof >/dev/null 2>&1; then
-    while IFS= read -r p; do
-      [[ -n "$p" ]] && pids+=("$p")
-    done < <(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | sort -u)
-  elif command -v fuser >/dev/null 2>&1; then
-    while IFS= read -r p; do
-      [[ -n "$p" ]] && pids+=("$p")
-    done < <(fuser -n tcp "$port" 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -u || true)
-  fi
+  while IFS= read -r p; do
+    [[ -n "$p" ]] && pids+=("$p")
+  done < <(listener_pids_for_port "$port" || true)
 
   if (( ${#pids[@]} > 0 )); then
     log "port :$port already in use by pid(s): ${pids[*]} — terminating stale listener(s)"
@@ -185,17 +231,22 @@ free_bench_port() {
   fi
 
   for _ in $(seq 1 100); do
-    local still_busy=""
-    if command -v lsof >/dev/null 2>&1; then
-      still_busy="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | head -n1 || true)"
-    elif command -v fuser >/dev/null 2>&1; then
-      still_busy="$(fuser -n tcp "$port" 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+$' | head -n1 || true)"
+    if ! port_has_listener "$port"; then
+      return 0
     fi
-    [[ -z "$still_busy" ]] && return 0
     sleep 0.05
   done
 
-  echo "ERROR: port :$port is still in use after cleanup" >&2
+  pids=()
+  while IFS= read -r p; do
+    [[ -n "$p" ]] && pids+=("$p")
+  done < <(listener_pids_for_port "$port" || true)
+
+  if (( ${#pids[@]} > 0 )); then
+    echo "ERROR: port :$port is still in use after cleanup (pid(s): ${pids[*]})" >&2
+  else
+    echo "ERROR: port :$port is still in use after cleanup (could not resolve owner PID; install lsof/fuser/ss)" >&2
+  fi
   return 1
 }
 
@@ -246,9 +297,9 @@ bench_variant() {
     exit 1
   fi
 
-  if [[ "$variant" != "native_docker" ]] && command -v lsof >/dev/null 2>&1; then
+  if [[ "$variant" != "native_docker" ]]; then
     local listener_pid
-    listener_pid="$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | head -n1 || true)"
+    listener_pid="$(listener_pids_for_port "$PORT" | head -n1 || true)"
     if [[ -n "$listener_pid" && "$listener_pid" != "$pid" ]]; then
       echo "ERROR: health endpoint is not served by launched PID (expected $pid, listener $listener_pid)" >&2
       tail -n 160 "$server_log" || true
