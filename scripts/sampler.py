@@ -1,24 +1,22 @@
 #!/usr/bin/env python3
-"""
-sampler.py — per-PID resource sampler for bench_throughput.sh
-
-Usage:
-    python3 scripts/sampler.py \
-        --pid <liveness-pid> \
-        --sample-pid <pid-to-measure>  \   # defaults to --pid
-        --mode gateway|wasmedge         \
-        --out <output.csv>              \
-        --interval 0.2                      # seconds between samples
-
-Output CSV columns: ts_ms, rss_kb, cpu_pct
-
-CPU is measured as the fraction of one CPU used over the sample interval
-(same definition as `top` / `htop`).  On Linux this is backed by
-/proc/pid/stat tick deltas via psutil; on macOS it uses Mach task_info.
-
-For mode=wasmedge the script aggregates all running `wasmedge` processes
-(they are short-lived per-request subprocesses).
-"""
+# sampler.py -- per-PID resource sampler for bench_throughput.sh
+#
+# Usage:
+#   python3 scripts/sampler.py
+#       --pid <liveness-pid>
+#       --sample-pid <pid-to-measure>   (defaults to --pid)
+#       --mode gateway|wasmedge
+#       --out <output.csv>
+#       --interval 0.2                  (seconds between samples)
+#
+# Output CSV columns: ts_ms, rss_kb, cpu_pct
+#
+# CPU is measured as the fraction of one CPU used over the sample interval
+# (same definition as top/htop). On Linux this is backed by /proc/pid/stat
+# tick deltas via psutil; on macOS it uses Mach task_info.
+#
+# For mode=wasmedge the script aggregates all running wasmedge processes
+# (they are short-lived per-request subprocesses).
 import argparse
 import signal
 import sys

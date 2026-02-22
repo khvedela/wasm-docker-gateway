@@ -77,8 +77,8 @@ done
 
 # Ensure psutil is available; install it into the venv if missing.
 if ! "$PYTHON" -c "import psutil" 2>/dev/null; then
-  log "psutil not found — installing into venv …"
-  "$PYTHON" -m pip install --quiet psutil
+  log "psutil not found — installing …"
+  "$PYTHON" -m pip install psutil || { echo "ERROR: failed to install psutil" >&2; exit 1; }
 fi
 
 SAMPLER="$ROOT/scripts/sampler.py"
