@@ -1,14 +1,20 @@
 use anyhow::{anyhow, Context, Result};
 use once_cell::sync::Lazy;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::env;
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, RwLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use url::Url;
 use uuid::Uuid;
+use wasmtime::{Engine, Linker, Module, Store};
+use wasmtime_wasi::p1::{self, WasiP1Ctx};
+use wasmtime_wasi::p2::pipe::{MemoryInputPipe, MemoryOutputPipe};
+use wasmtime_wasi::{I32Exit, WasiCtxBuilder};
 
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_REQ_BODY_BYTES: usize = 2 * 1024 * 1024;
@@ -17,6 +23,14 @@ const IO_TIMEOUT: Duration = Duration::from_secs(5);
 const GATEWAY_VARIANT: &str = "wasm-host";
 
 static COUNTER: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+static WASMTIME_EMBEDDED_CACHE: Lazy<RwLock<HashMap<String, Arc<EmbeddedWasmtime>>>> =
+    Lazy::new(|| RwLock::new(HashMap::new()));
+
+#[derive(Debug)]
+struct EmbeddedWasmtime {
+    engine: Engine,
+    module: Module,
+}
 
 fn cpu_heavy(iters: u64) -> String {
     let mut hash = [0u8; 32];
@@ -54,10 +68,18 @@ fn main() -> Result<()> {
     let wasm_module_path =
         env::var("WASM_MODULE_PATH").unwrap_or_else(|_| "./gateway_logic.wasm".to_string());
     let wasm_runtime = env::var("WASM_RUNTIME").unwrap_or_else(|_| "wasmedge".to_string());
-    if wasm_runtime != "wasmedge" && wasm_runtime != "wasmtime" {
+    if wasm_runtime != "wasmedge"
+        && wasm_runtime != "wasmtime"
+        && wasm_runtime != "wasmtime_embedded"
+    {
         return Err(anyhow!(
-            "invalid WASM_RUNTIME={wasm_runtime} (expected: wasmedge|wasmtime)"
+            "invalid WASM_RUNTIME={wasm_runtime} (expected: wasmedge|wasmtime|wasmtime_embedded)"
         ));
+    }
+    if wasm_runtime == "wasmtime_embedded" {
+        get_or_compile_embedded_wasmtime(&wasm_module_path).with_context(|| {
+            format!("failed to initialize embedded Wasmtime with module {wasm_module_path}")
+        })?;
     }
 
     let upstream = parse_upstream(&upstream_url)?;
@@ -195,6 +217,7 @@ fn handle_client(
     let proxy_headers = vec![
         ("X-Upstream-Url", upstream.raw_url.as_str()),
         ("X-Upstream-Status", upstream_status_str.as_str()),
+        ("x-wasm-processed", "1"),
     ];
     let new_resp = rebuild_response_with_extra_headers(
         &resp_head,
@@ -465,6 +488,7 @@ fn rebuild_response_with_extra_headers(
             || lower.starts_with("x-gateway-workload:")
             || lower.starts_with("x-upstream-url:")
             || lower.starts_with("x-upstream-status:")
+            || lower.starts_with("x-wasm-processed:")
         {
             continue;
         }
@@ -484,6 +508,14 @@ fn rebuild_response_with_extra_headers(
 }
 
 fn wasm_transform(runtime: &str, module_path: &str, input: &[u8]) -> Result<Vec<u8>> {
+    match runtime {
+        "wasmedge" | "wasmtime" => wasm_transform_cli(runtime, module_path, input),
+        "wasmtime_embedded" => wasm_transform_wasmtime_embedded(module_path, input),
+        _ => Err(anyhow!("unsupported wasm runtime: {runtime}")),
+    }
+}
+
+fn wasm_transform_cli(runtime: &str, module_path: &str, input: &[u8]) -> Result<Vec<u8>> {
     let mut cmd = match runtime {
         "wasmedge" => {
             let mut cmd = Command::new("wasmedge");
@@ -495,7 +527,7 @@ fn wasm_transform(runtime: &str, module_path: &str, input: &[u8]) -> Result<Vec<
             cmd.arg("run").arg(module_path);
             cmd
         }
-        _ => return Err(anyhow!("unsupported wasm runtime: {runtime}")),
+        _ => return Err(anyhow!("unsupported CLI wasm runtime: {runtime}")),
     };
 
     let mut child = cmd
@@ -528,6 +560,67 @@ fn wasm_transform(runtime: &str, module_path: &str, input: &[u8]) -> Result<Vec<
     }
 
     Ok(output.stdout)
+}
+
+fn wasm_transform_wasmtime_embedded(module_path: &str, input: &[u8]) -> Result<Vec<u8>> {
+    let runtime = get_or_compile_embedded_wasmtime(module_path)?;
+
+    let stdin_pipe = MemoryInputPipe::new(input.to_vec());
+    let stdout_pipe = MemoryOutputPipe::new(usize::MAX);
+
+    let mut wasi_builder = WasiCtxBuilder::new();
+    wasi_builder.stdin(stdin_pipe);
+    wasi_builder.stdout(stdout_pipe.clone());
+    wasi_builder.arg(module_path);
+    let mut store = Store::new(&runtime.engine, wasi_builder.build_p1());
+
+    let mut linker: Linker<WasiP1Ctx> = Linker::new(&runtime.engine);
+    p1::add_to_linker_sync(&mut linker, |ctx| ctx)
+        .context("failed to add WASI preview1 imports for embedded runtime")?;
+
+    let instance = linker
+        .instantiate(&mut store, &runtime.module)
+        .with_context(|| format!("failed to instantiate embedded module {module_path}"))?;
+    let start = instance
+        .get_typed_func::<(), ()>(&mut store, "_start")
+        .context("embedded module is missing _start")?;
+
+    if let Err(err) = start.call(&mut store, ()) {
+        if let Some(exit) = err.downcast_ref::<I32Exit>() {
+            if exit.0 != 0 {
+                return Err(anyhow!("wasmtime_embedded exited with status {}", exit.0));
+            }
+        } else {
+            return Err(err).context("embedded module _start call failed");
+        }
+    }
+
+    Ok(stdout_pipe.contents().to_vec())
+}
+
+fn get_or_compile_embedded_wasmtime(module_path: &str) -> Result<Arc<EmbeddedWasmtime>> {
+    {
+        let cache = WASMTIME_EMBEDDED_CACHE
+            .read()
+            .map_err(|_| anyhow!("wasmtime embedded cache lock poisoned"))?;
+        if let Some(existing) = cache.get(module_path) {
+            return Ok(Arc::clone(existing));
+        }
+    }
+
+    let engine = Engine::default();
+    let module = Module::from_file(&engine, module_path)
+        .with_context(|| format!("failed to compile wasm module at {module_path}"))?;
+    let compiled = Arc::new(EmbeddedWasmtime { engine, module });
+
+    let mut cache = WASMTIME_EMBEDDED_CACHE
+        .write()
+        .map_err(|_| anyhow!("wasmtime embedded cache lock poisoned"))?;
+    if let Some(existing) = cache.get(module_path) {
+        return Ok(Arc::clone(existing));
+    }
+    cache.insert(module_path.to_string(), Arc::clone(&compiled));
+    Ok(compiled)
 }
 
 fn find_double_crlf(buf: &[u8]) -> Option<usize> {

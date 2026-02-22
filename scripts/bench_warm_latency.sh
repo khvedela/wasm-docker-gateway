@@ -241,5 +241,6 @@ run_server_and_bench "native_local"  "./scripts/run_native_local.sh"
 run_server_and_bench "native_docker" "PORT=$PORT ./scripts/run_docker.sh"
 run_server_and_bench "wasm_host_cli" "WASM_MODULE_PATH=$ROOT/gateway_logic.wasm ./scripts/run_wasm_host_local.sh"
 run_server_and_bench "wasm_host_wasmtime" "PORT=$PORT WASM_MODULE_PATH=$ROOT/gateway_logic.wasm ./scripts/run_wasm_host_wasmtime.sh"
+run_server_and_bench "wasm_host_wasmtime_embedded" "PORT=$PORT WASM_RUNTIME=wasmtime_embedded WASM_MODULE_PATH=$ROOT/gateway_logic.wasm ./scripts/run_wasm_host_local.sh"
 
 log "wrote $OUT"

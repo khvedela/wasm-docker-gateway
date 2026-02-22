@@ -510,15 +510,17 @@ bench_variant "wasm_host_cli" \
   "WASM_MODULE_PATH=\"$ROOT/gateway_logic.wasm\" exec \"$ROOT/target/release/gateway_host\""
 bench_variant "wasm_host_wasmtime" \
   "PORT=$PORT WASM_MODULE_PATH=\"$ROOT/gateway_logic.wasm\" exec \"$ROOT/scripts/run_wasm_host_wasmtime.sh\""
+bench_variant "wasm_host_wasmtime_embedded" \
+  "set -a; source \"$ROOT/configs/bench.env\"; set +a; WASM_RUNTIME=wasmtime_embedded WASM_MODULE_PATH=\"$ROOT/gateway_logic.wasm\" exec \"$ROOT/target/release/gateway_host\""
 
 # ---------------------------------------------------------------------------
 # ANALYSIS CSV
 #
-# Why wasmedge_* columns are N/A for wasm_host_cli / wasm_host_wasmtime:
-#   In wasm_host_* variants the Rust host spawns the Wasm runtime as a
-#   short-lived subprocess *per request* (lifetime ≈ a few milliseconds).
-#   The sampler polls every ~200 ms, so it almost never catches a running
-#   runtime process. The columns read as zeros by chance, not by design.
+# Why wasmedge_* columns are N/A for wasm_host_* variants:
+#   - wasm_host_cli / wasm_host_wasmtime spawn short-lived runtime subprocesses
+#     per request, which are too brief for the ~200 ms sampler interval.
+#   - wasm_host_wasmtime_embedded runs in-process, so there is no separate
+#     runtime process to sample at all.
 #
 # Why totals are still valid for wasm_host_cli:
 #   The gateway_host process blocks synchronously (stdio pipe) while waiting
@@ -536,7 +538,7 @@ import sys, csv
 src, dst = sys.argv[1], sys.argv[2]
 
 # Variants whose wasmedge_* columns cannot be reliably sampled.
-WASM_VARIANTS = {"wasm_host_cli", "wasm_host_wasmtime"}
+WASM_VARIANTS = {"wasm_host_cli", "wasm_host_wasmtime", "wasm_host_wasmtime_embedded"}
 NA = "NA"
 
 with open(src, newline="") as f:
@@ -560,8 +562,8 @@ with open(dst, "w", newline="") as f:
             row["wasmedge_cpu_max"]    = NA
         # Totals: gateway values only.
         # For native_local / native_docker: gateway IS the whole process.
-        # For wasm_host_cli: gateway blocks on wasmedge stdio, so its RSS/CPU
-        # already capture the full per-request cost.
+        # For wasm_host_* variants, gateway process RSS/CPU are the primary
+        # process-level totals for end-to-end request handling.
         def _f(col):
             try: return float(row[col])
             except: return 0.0

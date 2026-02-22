@@ -73,6 +73,8 @@ bench_one "wasm_host_cli" \
   "set -a; source \"$ROOT/configs/bench.env\"; set +a; WASM_MODULE_PATH=\"$ROOT/gateway_logic.wasm\" exec \"$ROOT/target/release/gateway_host\""
 bench_one "wasm_host_wasmtime" \
   "set -a; source \"$ROOT/configs/bench.env\"; set +a; WASM_RUNTIME=wasmtime WASM_MODULE_PATH=\"$ROOT/gateway_logic.wasm\" exec \"$ROOT/target/release/gateway_host\""
+bench_one "wasm_host_wasmtime_embedded" \
+  "set -a; source \"$ROOT/configs/bench.env\"; set +a; WASM_RUNTIME=wasmtime_embedded WASM_MODULE_PATH=\"$ROOT/gateway_logic.wasm\" exec \"$ROOT/target/release/gateway_host\""
 
 # native_docker: pre-build the image once so the 20 hyperfine iterations only
 # measure container startup time, not image build time.

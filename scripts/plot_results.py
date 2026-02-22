@@ -33,6 +33,8 @@ VARIANT_STYLE = {
     "native_local":  {"color": "#2196F3", "marker": "o", "label": "native (local)"},
     "native_docker": {"color": "#4CAF50", "marker": "s", "label": "native (docker)"},
     "wasm_host_cli": {"color": "#FF9800", "marker": "^", "label": "wasm host (CLI)"},
+    "wasm_host_wasmtime": {"color": "#9C27B0", "marker": "X", "label": "wasm host (Wasmtime CLI)"},
+    "wasm_host_wasmtime_embedded": {"color": "#E91E63", "marker": "D", "label": "wasm host (Wasmtime embedded)"},
 }
 WORKLOADS   = ["hello", "compute", "state", "proxy"]
 FIGSIZE_LINE = (7, 4.5)
