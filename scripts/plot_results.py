@@ -67,7 +67,7 @@ def save(fig: plt.Figure, path: str) -> None:
 def load_throughput(path: str) -> pd.DataFrame:
     df = pd.read_csv(path)
     # Average duplicate (variant, workload, conns) rows from repeated bench runs
-    numeric = [c for c in df.columns if c not in ("run_ts", "variant", "workload")]
+    numeric = [c for c in df.columns if c not in ("run_ts", "variant", "workload", "conns")]
     df[numeric] = df[numeric].apply(pd.to_numeric, errors="coerce")
     df = (
         df.groupby(["variant", "workload", "conns"], as_index=False)[numeric]
@@ -150,16 +150,17 @@ def plot_latency(df: pd.DataFrame, out_dir: str) -> None:
 
 
 def plot_cpu(df: pd.DataFrame, out_dir: str) -> None:
-    print("\n[3] CPU utilisation (gateway_cpu_avg vs conns)")
+    y_col = "total_cpu_avg" if "total_cpu_avg" in df.columns else "gateway_cpu_avg"
+    print(f"\n[3] CPU utilisation ({y_col} vs conns)")
     note = (
-        "native_docker CPU reads 0 — the sampler attaches to the docker-run "
-        "shell PID, not the container process."
+        "Point estimate from aggregated means. Interpret CPU together with RPS/latency; "
+        "CPU alone is not a performance ranking."
     )
     for wl in WORKLOADS:
         line_plot(
             df, wl,
-            y_col="gateway_cpu_avg",
-            y_label="Gateway CPU avg (%)",
+            y_col=y_col,
+            y_label="Total CPU avg (%)",
             title=f"CPU utilisation — {wl}",
             out_path=os.path.join(out_dir, f"cpu_{wl}.png"),
             footnote=note,
@@ -167,17 +168,20 @@ def plot_cpu(df: pd.DataFrame, out_dir: str) -> None:
 
 
 def plot_memory(df: pd.DataFrame, out_dir: str) -> None:
-    print("\n[4] Memory RSS (gateway_rss_avg_kb vs conns)")
+    y_col = "total_rss_avg_kb" if "total_rss_avg_kb" in df.columns else "gateway_rss_avg_kb"
+    print(f"\n[4] Memory RSS ({y_col} vs conns)")
+    note = "Point estimate from aggregated means; memory values are per-variant process totals."
     for wl in WORKLOADS:
         # Convert KB → MB for readability
         tmp = df.copy()
-        tmp["rss_avg_mb"] = tmp["gateway_rss_avg_kb"] / 1024.0
+        tmp["rss_avg_mb"] = tmp[y_col] / 1024.0
         line_plot(
             tmp, wl,
             y_col="rss_avg_mb",
-            y_label="Gateway RSS avg (MB)",
+            y_label="Total RSS avg (MB)",
             title=f"Memory — {wl}",
             out_path=os.path.join(out_dir, f"memory_{wl}.png"),
+            footnote=note,
         )
 
 
