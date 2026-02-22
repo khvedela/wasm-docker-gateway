@@ -390,19 +390,21 @@ bench_variant "native_local" \
 bench_variant "native_docker" "PORT=$PORT exec \"$ROOT/scripts/run_docker.sh\""
 bench_variant "wasm_host_cli" \
   "WASM_MODULE_PATH=\"$ROOT/gateway_logic.wasm\" exec \"$ROOT/target/release/gateway_host\""
+bench_variant "wasm_host_wasmtime" \
+  "PORT=$PORT WASM_MODULE_PATH=\"$ROOT/gateway_logic.wasm\" exec \"$ROOT/scripts/run_wasm_host_wasmtime.sh\""
 
 # ---------------------------------------------------------------------------
 # ANALYSIS CSV
 #
-# Why wasmedge_* columns are N/A for wasm_host_cli:
-#   In the wasm_host_cli variant the Rust host spawns `wasmedge` as a
+# Why wasmedge_* columns are N/A for wasm_host_cli / wasm_host_wasmtime:
+#   In wasm_host_* variants the Rust host spawns the Wasm runtime as a
 #   short-lived subprocess *per request* (lifetime ≈ a few milliseconds).
 #   The sampler polls every ~200 ms, so it almost never catches a running
-#   wasmedge process. The columns read as zeros by chance, not by design.
+#   runtime process. The columns read as zeros by chance, not by design.
 #
 # Why totals are still valid for wasm_host_cli:
 #   The gateway_host process blocks synchronously (stdio pipe) while waiting
-#   for wasmedge to exit, so gateway RSS / CPU already account for the full
+#   for the runtime subprocess to exit, so gateway RSS / CPU already account for the full
 #   cost of each request (execution time, wait time, process-spawn overhead).
 #   RPS and latency_mean_ms likewise capture the true end-to-end cost.
 #
@@ -416,7 +418,7 @@ import sys, csv
 src, dst = sys.argv[1], sys.argv[2]
 
 # Variants whose wasmedge_* columns cannot be reliably sampled.
-WASM_VARIANTS = {"wasm_host_cli"}
+WASM_VARIANTS = {"wasm_host_cli", "wasm_host_wasmtime"}
 NA = "NA"
 
 with open(src, newline="") as f:

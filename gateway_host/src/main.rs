@@ -4,6 +4,7 @@ use sha2::{Digest, Sha256};
 use std::env;
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use url::Url;
@@ -52,6 +53,12 @@ fn main() -> Result<()> {
         env::var("UPSTREAM_URL").unwrap_or_else(|_| "http://127.0.0.1:18080".to_string());
     let wasm_module_path =
         env::var("WASM_MODULE_PATH").unwrap_or_else(|_| "./gateway_logic.wasm".to_string());
+    let wasm_runtime = env::var("WASM_RUNTIME").unwrap_or_else(|_| "wasmedge".to_string());
+    if wasm_runtime != "wasmedge" && wasm_runtime != "wasmtime" {
+        return Err(anyhow!(
+            "invalid WASM_RUNTIME={wasm_runtime} (expected: wasmedge|wasmtime)"
+        ));
+    }
 
     let upstream = parse_upstream(&upstream_url)?;
     let listener = TcpListener::bind(&listen).with_context(|| format!("bind LISTEN={listen}"))?;
@@ -59,11 +66,14 @@ fn main() -> Result<()> {
     eprintln!("[wasm-host] listening on http://{listen}");
     eprintln!("[wasm-host] forwarding to {upstream_url}");
     eprintln!("[wasm-host] wasm module: {wasm_module_path}");
+    eprintln!("[wasm-host] wasm runtime: {wasm_runtime}");
 
     for incoming in listener.incoming() {
         match incoming {
             Ok(mut client) => {
-                if let Err(e) = handle_client(&mut client, &upstream, &wasm_module_path) {
+                if let Err(e) =
+                    handle_client(&mut client, &upstream, &wasm_module_path, &wasm_runtime)
+                {
                     eprintln!("[wasm-host] client error: {e:#}");
                 }
             }
@@ -109,7 +119,8 @@ fn parse_upstream(s: &str) -> Result<Upstream> {
 fn handle_client(
     client: &mut TcpStream,
     upstream: &Upstream,
-    _wasm_module_path: &str,
+    wasm_module_path: &str,
+    wasm_runtime: &str,
 ) -> Result<()> {
     client.set_read_timeout(Some(IO_TIMEOUT)).ok();
     client.set_write_timeout(Some(IO_TIMEOUT)).ok();
@@ -129,13 +140,9 @@ fn handle_client(
     }
 
     if req.method == "GET" && (req.path == "/" || req.path.starts_with("/?")) {
-        let resp = build_response(
-            "HTTP/1.1 200 OK",
-            b"hello",
-            "hello",
-            Some("text/plain"),
-            &[],
-        );
+        let body = wasm_transform(wasm_runtime, wasm_module_path, b"hello")
+            .context("wasm transform failed for / workload")?;
+        let resp = build_response("HTTP/1.1 200 OK", &body, "hello", Some("text/plain"), &[]);
         client.write_all(&resp)?;
         client.flush().ok();
         client.shutdown(std::net::Shutdown::Both).ok();
@@ -148,13 +155,9 @@ fn handle_client(
             .unwrap_or(50_000);
 
         let result = cpu_heavy(iters);
-        let resp = build_response(
-            "HTTP/1.1 200 OK",
-            result.as_bytes(),
-            "compute",
-            Some("text/plain"),
-            &[],
-        );
+        let body = wasm_transform(wasm_runtime, wasm_module_path, result.as_bytes())
+            .context("wasm transform failed for /compute workload")?;
+        let resp = build_response("HTTP/1.1 200 OK", &body, "compute", Some("text/plain"), &[]);
         client.write_all(&resp)?;
         client.flush().ok();
         client.shutdown(std::net::Shutdown::Both).ok();
@@ -164,13 +167,9 @@ fn handle_client(
     if req.method == "GET" && req.path.starts_with("/state") {
         let value = COUNTER.fetch_add(1, Ordering::SeqCst);
         let body_str = value.to_string();
-        let resp = build_response(
-            "HTTP/1.1 200 OK",
-            body_str.as_bytes(),
-            "state",
-            Some("text/plain"),
-            &[],
-        );
+        let body = wasm_transform(wasm_runtime, wasm_module_path, body_str.as_bytes())
+            .context("wasm transform failed for /state workload")?;
+        let resp = build_response("HTTP/1.1 200 OK", &body, "state", Some("text/plain"), &[]);
         client.write_all(&resp)?;
         client.flush().ok();
         client.shutdown(std::net::Shutdown::Both).ok();
@@ -191,12 +190,18 @@ fn handle_client(
     let (resp_head, resp_body) = split_http_response(&resp_bytes)?;
     let upstream_status = parse_status_code_from_head(&resp_head)?;
     let upstream_status_str = upstream_status.to_string();
+    let transformed_body = wasm_transform(wasm_runtime, wasm_module_path, &resp_body)
+        .context("wasm transform failed for proxy workload")?;
     let proxy_headers = vec![
         ("X-Upstream-Url", upstream.raw_url.as_str()),
         ("X-Upstream-Status", upstream_status_str.as_str()),
     ];
-    let new_resp =
-        rebuild_response_with_extra_headers(&resp_head, &resp_body, "proxy", &proxy_headers)?;
+    let new_resp = rebuild_response_with_extra_headers(
+        &resp_head,
+        &transformed_body,
+        "proxy",
+        &proxy_headers,
+    )?;
 
     client.write_all(&new_resp)?;
     client.flush().ok();
@@ -476,6 +481,53 @@ fn rebuild_response_with_extra_headers(
     out.extend_from_slice(b"Connection: close\r\n\r\n");
     out.extend_from_slice(body);
     Ok(out)
+}
+
+fn wasm_transform(runtime: &str, module_path: &str, input: &[u8]) -> Result<Vec<u8>> {
+    let mut cmd = match runtime {
+        "wasmedge" => {
+            let mut cmd = Command::new("wasmedge");
+            cmd.arg(module_path);
+            cmd
+        }
+        "wasmtime" => {
+            let mut cmd = Command::new("wasmtime");
+            cmd.arg("run").arg(module_path);
+            cmd
+        }
+        _ => return Err(anyhow!("unsupported wasm runtime: {runtime}")),
+    };
+
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("failed to spawn {runtime} for module {module_path}"))?;
+
+    {
+        let stdin = child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| anyhow!("failed to open stdin for {runtime}"))?;
+        stdin
+            .write_all(input)
+            .with_context(|| format!("failed writing input to {runtime}"))?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .with_context(|| format!("failed waiting for {runtime} process"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!(
+            "{runtime} exited with status {}: {}",
+            output.status,
+            stderr.trim()
+        ));
+    }
+
+    Ok(output.stdout)
 }
 
 fn find_double_crlf(buf: &[u8]) -> Option<usize> {
