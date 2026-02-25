@@ -1,31 +1,3 @@
-\documentclass[a4paper,12pt]{article}
-
-\usepackage[english]{babel}
-\usepackage{fancyhdr}
-\usepackage[utf8]{inputenc}
-\usepackage{epsfig}
-\usepackage{calc}
-\usepackage{url}
-\IfFileExists{boxedminipage.sty}{%
-  \usepackage{boxedminipage}%
-}{%
-  \newenvironment{boxedminipage}[1]{%
-    \begin{center}%
-    \fbox\bgroup%
-    \begin{minipage}{##1}%
-  }{%
-    \end{minipage}%
-    \egroup%
-    \end{center}%
-  }%
-}
-\usepackage{graphicx}
-\usepackage{booktabs}
-\usepackage{hyperref}
-\usepackage{mathptmx}
-\usepackage{siunitx}
-\usepackage[table]{xcolor}
-\IfFileExists{placeins.sty}{\usepackage{placeins}}{\newcommand{\FloatBarrier}{\clearpage}}
 # WebAssembly vs Docker Gateway — Performance Benchmark Study
 
 **Course:** RSX207 (CNAM) — Final report (2025–26)
